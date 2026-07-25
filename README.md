@@ -1,2 +1,5 @@
-# Report-Paper
-Space for various document storage purposes.
+# 보고서 모음집
+
+## 폴더 경로
+
+- **insight**: 산업 동향 및 인사이트 관련 문서 저장소
