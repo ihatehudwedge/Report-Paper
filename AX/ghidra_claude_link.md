@@ -1,4 +1,4 @@
-<img width="1586" height="816" alt="image" src="https://github.com/user-attachments/assets/65334e63-73b6-4ab3-b326-06787dad10b1" /><img width="1586" height="816" alt="image" src="https://github.com/user-attachments/assets/70438a46-d888-4216-95ba-5cb78ca7fc5a" /># Ghidra - Claude 간 연동을 통한 변수, 메소드명 재할당
+# Ghidra - Claude 간 연동을 통한 변수, 메소드명 재할당
 
 ## 전체 아키텍처
 
