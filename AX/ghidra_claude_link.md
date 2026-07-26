@@ -1,4 +1,4 @@
-# Ghidra - Claude 간 연동을 통한 변수, 메소드명 재할당
+<img width="1586" height="816" alt="image" src="https://github.com/user-attachments/assets/65334e63-73b6-4ab3-b326-06787dad10b1" /><img width="1586" height="816" alt="image" src="https://github.com/user-attachments/assets/70438a46-d888-4216-95ba-5cb78ca7fc5a" /># Ghidra - Claude 간 연동을 통한 변수, 메소드명 재할당
 
 ## 전체 아키텍처
 
@@ -22,6 +22,9 @@
 5. 키는 sk-ant-로 시작하며 생성 시 단 한 번만 화면에 표시됩니다. 즉시 복사해서 안전한 곳(예: 분석 VM의 환경변수)에 저장하세요. 다시 볼 수 없고, 잃어버리면 삭제 후 재발급해야 합니다.
 6. 같은 화면에서 **Spend Limit**을 설정해두는 것을 권장합니다 — 스크립트가 대량의 함수를 자동으로 순회하며 호출하므로 예상치 못한 비용 발생을 막기 위함입니다.
 
+   <img width="935" height="279" alt="image" src="https://github.com/user-attachments/assets/57ca093e-829c-4f34-940d-b1427cca88df" />
+
+
 키는 Ghidra 자동화 전용 키를 하나 따로 만들어 두어서 악성코드에 의해 유출 시 대응을 쉽게 할 수 있습니다.
 
 ## 스크립트 배치
@@ -31,7 +34,6 @@
     ```
     ghidra-claude/
     ├── .api                     # 실제 키로 채워넣은 뒤 사용
-    ├── requirements.txt
     └── ghidra_claude_rename.py
     ```
 
@@ -40,18 +42,7 @@
 <div markdown="1">
 
 ```
-ANTHROPIC_API_KEY="sk-ant-xxxxxxxx"
-```
-
-</div>
-</details>
-
-<details>
-<summary>requirements.txt</summary>
-<div markdown="1">
-
-```
-anthropic>=0.40.0
+ANTHROPIC_API_KEY=sk-ant-xxxxxxxx
 ```
 
 </div>
@@ -62,27 +53,13 @@ anthropic>=0.40.0
 <div markdown="1">
 
 ```py
+# @runtime PyGhidra
 # -*- coding: utf-8 -*-
-"""
-ghidra_claude_rename.py
- 
-Ghidra(Ghidrathon, Python 3) 환경에서 실행되는 스크립트.
-현재 프로그램의 함수를 디컴파일하여 Claude API에 전달하고,
-제안받은 함수명/변수명을 프로그램에 반영한다.
- 
-사전 준비:
-  1) requirements.txt 로 만든 venv를 Ghidrathon 인터프리터로 지정
-  2) 같은 디렉토리(또는 지정한 경로)에 .api 파일 배치
-     (형식: ANTHROPIC_API_KEY=sk-ant-...)
-  3) Script Manager에 이 파일을 등록 (~/ghidra_scripts 에 복사)
- 
-@category Claude.AI
-"""
  
 import json
 import os
- 
-from anthropic import Anthropic, APIError
+import urllib.request
+import urllib.error
  
 from ghidra.app.decompiler import DecompInterface, DecompileOptions
 from ghidra.util.task import ConsoleTaskMonitor
@@ -93,10 +70,14 @@ from ghidra.program.model.pcode import HighFunctionDBUtil
 # ---------------------------------------------------------------------------
 # 설정값
 # ---------------------------------------------------------------------------
-API_KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".api")
-MODEL = "claude-sonnet-4-6"        # 비용을 낮추려면 claude-haiku-4-5-20251001 사용
+SCRIPT_DIR = os.path.dirname(os.path.abspath(globals().get("__file__", "ghidra_claude_rename.py")))
+API_KEY_FILE = os.path.join(SCRIPT_DIR, ".api")
+ 
+API_URL = "https://api.anthropic.com/v1/messages"
+MODEL = "claude-sonnet-4-6"          # 비용을 낮추려면 claude-haiku-4-5-20251001 사용
+ANTHROPIC_VERSION = "2023-06-01"
 MAX_TOKENS = 1024
-MAX_FUNCTIONS = 50                  # 1회 실행당 처리할 함수 수 상한 (비용 안전장치)
+MAX_FUNCTIONS = 50                    # 1회 실행당 처리할 함수 수 상한 (비용 안전장치)
 SKIP_LIBRARY_FUNCTIONS = True
 DECOMPILE_TIMEOUT_SECONDS = 30
  
@@ -119,7 +100,7 @@ def load_api_key(path):
     if not os.path.isfile(path):
         raise RuntimeError(
             "API 키 파일을 찾을 수 없습니다: %s\n"
-            "ANTHROPIC_API_KEY=sk-ant-... 형식으로 .api 파일을 만들어 두세요." % path
+            "ANTHROPIC_API_KEY=sk-ant-... 형식으로 .api 파일을 같은 폴더에 만들어 두세요." % path
         )
  
     with open(path, "r") as f:
@@ -139,36 +120,44 @@ def load_api_key(path):
     )
  
  
-def build_client():
-    api_key = load_api_key(API_KEY_FILE)
-    return Anthropic(api_key=api_key)
+def call_claude(api_key, decompiled_code, function_name):
+    """디컴파일된 코드를 Claude에 보내고 이름 제안 JSON을 받아온다."""
  
- 
-def ask_claude(client, decompiled_code, function_name):
-    """디컴파일 코드를 Claude에 보내고 이름 제안 JSON을 받아온다."""
     user_prompt = (
         "Current function name: %s\n\nDecompiled code:\n```c\n%s\n```"
         % (function_name, decompiled_code)
     )
  
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=MAX_TOKENS,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_prompt}],
-    )
+    payload = {
+        "model": MODEL,
+        "max_tokens": MAX_TOKENS,
+        "system": SYSTEM_PROMPT,
+        "messages": [
+            {"role": "user", "content": user_prompt}
+        ],
+    }
  
-    text = "".join(
-        block.text for block in response.content if getattr(block, "type", None) == "text"
-    ).strip()
+    body = json.dumps(payload).encode("utf-8")
  
-    if text.startswith("```"):
-        text = text.strip("`")
-        if text.lower().startswith("json"):
-            text = text[4:]
-        text = text.strip()
+    request = urllib.request.Request(API_URL, data=body)
+    request.add_header("content-type", "application/json")
+    request.add_header("x-api-key", api_key)
+    request.add_header("anthropic-version", ANTHROPIC_VERSION)
  
-    return json.loads(text)
+    with urllib.request.urlopen(request, timeout=60) as response:
+        raw = response.read()
+ 
+    data = json.loads(raw)
+    text_parts = [block["text"] for block in data.get("content", []) if block.get("type") == "text"]
+    combined = "".join(text_parts).strip()
+ 
+    if combined.startswith("```"):
+        combined = combined.strip("`")
+        if combined.lower().startswith("json"):
+            combined = combined[4:]
+        combined = combined.strip()
+ 
+    return json.loads(combined)
  
  
 def decompile_function(decomp_iface, function, monitor):
@@ -179,8 +168,10 @@ def decompile_function(decomp_iface, function, monitor):
  
  
 def apply_suggestions(program, function, high_function, suggestions):
+    """제안받은 이름을 실제 프로그램에 반영한다."""
+ 
     new_func_name = suggestions.get("function_name")
-    var_map = suggestions.get("variables", {}) or {}
+    var_map = suggestions.get("variables", {})
  
     tx_id = program.startTransaction("Claude auto-rename: %s" % function.getName())
     success = False
@@ -206,9 +197,9 @@ def apply_suggestions(program, function, high_function, suggestions):
  
  
 def run():
-    client = build_client()
+    api_key = load_api_key(API_KEY_FILE)
  
-    program = currentProgram  # Ghidrathon이 주입하는 전역 변수
+    program = currentProgram  # PyGhidra도 Jython과 동일하게 전역 변수로 제공함 (함수 호출 아님)
     monitor = ConsoleTaskMonitor()
  
     decomp_iface = DecompInterface()
@@ -236,19 +227,17 @@ def run():
                     print("  디컴파일 실패, 건너뜀")
                     continue
  
-                suggestions = ask_claude(client, c_code, function.getName())
+                suggestions = call_claude(api_key, c_code, function.getName())
                 apply_suggestions(program, function, high_function, suggestions)
  
                 print("  -> 함수명: %s, 변수 %d개 변경 제안됨" % (
                     suggestions.get("function_name", "(변경없음)"),
-                    len(suggestions.get("variables", {}) or {})
+                    len(suggestions.get("variables", {}))
                 ))
                 processed += 1
  
-            except APIError as e:
-                print("  [오류] Claude API 호출 실패: %s" % e)
-            except (ValueError, json.JSONDecodeError) as e:
-                print("  [오류] 응답 JSON 파싱 실패: %s" % e)
+            except urllib.error.HTTPError as e:
+                print("  [오류] API 호출 실패 (HTTP %s): %s" % (e.code, e.read()))
             except Exception as e:
                 print("  [오류] %s 처리 중 예외: %s" % (function.getName(), e))
     finally:
@@ -264,36 +253,38 @@ run()
 </details>
 <br/>
 
-2. 스크립트를 실행하여 python 가상환경 세팅을 진행합니다.
+2. Ghidra에서 분석 대상 바이너리 열고 Code Browser 창을 활성화 후 자동분석 완료 대기 이후에 Window → Script Manager에 진입합니다.
+   ! 이때 support/pyghidraRun.bat을 이용하여 프로젝트를 열어야 합니다.
 
-    ```cmd
-    cd ghidra-claude
-    python -m venv .venv
-    .venv\Scripts\activate
-    pip install -r requirements.txt
-    ```
+   <img width="621" height="573" alt="image" src="https://github.com/user-attachments/assets/98e0a418-7a1a-4995-ba48-157b09867280" />
 
-3. Ghidrathon이 이 venv를 쓰도록 지정합니다.
 
-- Ghidra 메뉴에서 Ghidrathon → Configure Interpreter (버전에 따라 메뉴명이 다를 수 있음) 실행
-- 인터프리터 경로를 ghidra-claude/.venv/bin/python3 (Windows는 .venv\Scripts\python.exe)로 지정
-- 이 설정을 하지 않으면 시스템 기본 Python이 잡혀 anthropic 모듈을 찾지 못해 ModuleNotFoundError가 발생합니다.
+4. 우측 상단의 목록 버튼 클릭 → 새 창에서 + 버튼 클릭 → .api, python 코드가 있는 디렉토리를 적용시킵니다.
+
+   <img width="1105" height="556" alt="image" src="https://github.com/user-attachments/assets/f9f052f5-94f3-469a-9ff7-5ed184cc89e7" />
+
+
+6. Import 수행 후 Script Manager에서 생성한 코드를 추가한 뒤 Script 탭에서 실행하면 됩니다.
+
+   <img width="1102" height="589" alt="image" src="https://github.com/user-attachments/assets/2ddf26a1-fb8e-44de-8b20-b70e9b805e81" />
+
+
 
 ## 운영 고려사항
 
 ### 비용 관리
 
 - MAX_FUNCTIONS(현재 50)로 1회 실행당 호출 수를 제한해뒀습니다. 함수가 많은 바이너리는 여러 번에 나눠 돌리거나, 이 값을 늘리기 전에 Claude Platform API Keys 화면에서 Spend Limit을 반드시 설정하세요.
-- 비용에 민감하면 MODEL을 claude-haiku-4-5-20251001로 낮추고, 복잡한 알고리즘 함수만 별도로 Sonnet/Opus급으로 재처리하는 2단계 전략도 가능합니다.
+- 비용에 민감하면 MODEL을 `claude-haiku-4-5-20251001`로 낮추고, 복잡한 알고리즘 함수만 별도로 Sonnet/Opus급으로 재처리하는 2단계 전략도 가능합니다.
 
 ### .api 관리
 
-- 키가 유출되면 Console(console.anthropic.com/settings/keys)에서 즉시 삭제 후 재발급하세요. 동일 키를 여러 분석용 VM에서 재사용하지 말고, 이 워크플로 전용 키를 하나 분리해 두면 유출 시 영향 범위를 좁힐 수 있습니다.
-- .gitignore에 .api를 반드시 추가하고, 저장소에는 .api.example(더미 값)만 커밋하세요.
+- 키가 유출되면 Claude API Dashboard에서 즉시 삭제 후 재발급하세요. 동일 키를 여러 분석용 VM에서 재사용하지 말고, 이 워크플로 전용 키를 하나 분리해 두면 유출 시 영향 범위를 좁힐 수 있습니다.
+- .gitignore에 `.api`를 반드시 추가하고, 저장소에는 `.api.example(더미 값)`만 커밋하세요.
 
 ### 네트워크
 
-- 분석 VM에서 api.anthropic.com:443 아웃바운드가 허용되어야 합니다. 폐쇄망/에어갭 환경이라면 이 구성은 동작하지 않으므로, 별도의 프록시 게이트웨이나 오프라인 배치 처리 방식을 검토해야 합니다.
+- 분석 VM에서 `api.anthropic.com:443` 아웃바운드가 허용되어야 합니다. 폐쇄망/에어갭 환경이라면 이 구성은 동작하지 않으므로, 별도의 프록시 게이트웨이나 오프라인 배치 처리 방식을 검토해야 합니다.
 
 ### 실패 처리
 
